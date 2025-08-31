@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>Gallerio</title></head>
+<body>
+  <h1>Gallerio</h1>
+  <p>API 健康：<code id="h"></code></p>
+  <p><a href="/docs/">API 文档</a></p>
+  <script>
+    fetch('/api/health').then(r=>r.json()).then(j=>{document.getElementById('h').textContent = JSON.stringify(j)})
+  </script>
+</body>
+</html>
+
