@@ -58,7 +58,7 @@ func getenvInt(key string, def int) int {
 func Load() Config {
 	return Config{
 		AppAddr:     getenv("APP_ADDR", ":8080"),
-		MysqlDSN:    getenv("MYSQL_DSN", "slideshow:changeme@tcp(127.0.0.1:3306)/slideshow?parseTime=true&charset=utf8mb4"),
+		MysqlDSN:    getenv("MYSQL_DSN", "appuser:yourpasswordlol@tcp(yourip:3306)/slideshow?parseTime=true&charset=utf8mb4&loc=Local"),
 		DataDir:     getenv("DATA_DIR", "./data"),
 		UploadMaxMB: getenvInt("UPLOAD_MAX_MB", 30),
 		PageSize:    getenvInt("PAGE_SIZE", 50),

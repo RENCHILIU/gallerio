@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+data
+db
+**/*.md
+**/*.log
+**/*.tmp
+**/*.swp
+**/.DS_Store

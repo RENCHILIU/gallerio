@@ -1,0 +1,267 @@
+{{define "index"}}
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Slideshow</title>
+  <style>
+    :root{--gap:10px;--bg:#0b0b0b;--fg:#ddd;--muted:#888;--card:#111;--accent:#4da3ff}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto}
+    header{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #222;position:sticky;top:0;background:rgba(11,11,11,.9);backdrop-filter:saturate(1.2) blur(6px);z-index:1}
+    header h1{font-size:16px;margin:0 8px 0 0}
+    .hint{color:var(--muted);font-size:12px}
+    .container{display:grid;grid-template-columns:340px 1fr;gap:var(--gap);padding:var(--gap)}
+    @media (max-width: 900px){.container{grid-template-columns:1fr}}
+    /* 上传卡片 */
+    .card{background:var(--card);border:1px solid #1a1a1a;border-radius:10px;padding:12px}
+    .card h2{margin:0 0 8px 0;font-size:15px}
+    .drop{margin-top:6px;border:1px dashed #333;border-radius:10px;padding:16px;text-align:center;color:#bbb}
+    .drop.drag{border-color:var(--accent);color:#fff}
+    .drop input[type=file]{display:none}
+    .actions{display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+    .btn{background:#1b1b1b;border:1px solid #303030;color:#ddd;padding:8px 12px;border-radius:8px;cursor:pointer}
+    .btn.primary{border-color:#2b7bd8;background:#183b66}
+    .list{margin-top:10px;max-height:200px;overflow:auto;padding-right:4px}
+    .row{display:grid;grid-template-columns:1fr 70px;align-items:center;gap:8px;margin:6px 0}
+    .bar{height:6px;background:#262626;border-radius:4px;overflow:hidden}
+    .bar>i{display:block;height:100%;background:var(--accent);width:0%}
+    .err{color:#ff6b6b;font-size:12px}
+    /* 网格 */
+    .grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(160px,1fr));gap:var(--gap)}
+    .tile{position:relative;aspect-ratio:1/1;background:#0f0f0f;border:1px solid #1a1a1a;border-radius:10px;overflow:hidden}
+    .tile img{width:100%;height:100%;object-fit:contain;display:block}
+    .empty{padding:48px;text-align:center;color:var(--muted)}
+    .more{display:flex;justify-content:center;margin:14px 0}
+  </style>
+</head>
+<body>
+<header>
+  <h1>Slideshow</h1>
+  <span class="hint">内网 · 展示 + 上传（单文件上限：{{.UploadMaxMB}}MB）</span>
+  <a href="/slideshow" class="btn">播放全部（Slideshow）</a>
+</header>
+
+<div class="container">
+  <!-- 左侧：上传 -->
+  <section class="card">
+    <h2>上传照片</h2>
+    <div id="drop" class="drop">
+      <p>拖拽图片到此处，或</p>
+      <label class="btn"><input id="picker" type="file" accept="image/*" multiple>选择文件</label>
+      <div class="hint" style="margin-top:6px">支持 JPG/PNG/GIF/WebP；单文件 ≤ {{.UploadMaxMB}}MB</div>
+    </div>
+    <div class="actions">
+      <button id="start" class="btn primary">开始上传</button>
+      <button id="clear" class="btn">清空列表</button>
+    </div>
+    <div id="queue" class="list"></div>
+  </section>
+
+  <!-- 右侧：网格 -->
+  <section>
+    <div id="empty" class="empty" hidden>还没有照片。上传后这里会出现网格。</div>
+    <div id="grid" class="grid" hidden></div>
+    <div class="more"><button id="loadMore" class="btn" hidden>加载更多</button></div>
+  </section>
+</div>
+
+<script>
+(() => {
+  // 配置
+  const PAGE_SIZE = {{.PageSize}};
+  const UPLOAD_MAX_MB = {{.UploadMaxMB}};
+  const ACCEPT = ['image/jpeg','image/png','image/gif','image/webp'];
+
+  // DOM
+  const grid = document.getElementById('grid');
+  const empty = document.getElementById('empty');
+  const loadMoreBtn = document.getElementById('loadMore');
+  const drop = document.getElementById('drop');
+  const picker = document.getElementById('picker');
+  const startBtn = document.getElementById('start');
+  const clearBtn = document.getElementById('clear');
+  const queueEl = document.getElementById('queue');
+
+  // 列表分页状态
+  let offset = 0;
+  let hasMore = true;
+  let loading = false;
+
+  // ---- 网格：数据拉取 ----
+  async function fetchPage(off) {
+    const url = `/api/photos?limit=${PAGE_SIZE}&offset=${off}`;
+    const resp = await fetch(url, {headers:{'Accept':'application/json'}});
+    if (!resp.ok) throw new Error('加载失败 ' + resp.status);
+    return resp.json();
+  }
+
+  function renderItems(items, {prepend=false} = {}) {
+    if (!items || !items.length) return;
+    const frag = document.createDocumentFragment();
+    for (const it of items) {
+      const a = document.createElement('a');
+      a.className = 'tile';
+      a.href = it.pathOriginal;
+      a.target = '_blank';
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.src = it.pathOriginal;
+      img.alt = it.fileName || '';
+      a.appendChild(img);
+      frag.appendChild(a);
+    }
+    if (prepend) {
+      grid.prepend(frag);
+    } else {
+      grid.appendChild(frag);
+    }
+    grid.hidden = false;
+    empty.hidden = true;
+  }
+
+  async function loadFirstPage() {
+    loading = true;
+    offset = 0;
+    const data = await fetchPage(0);
+    grid.innerHTML = '';
+    if (!data.items || data.items.length === 0) {
+      grid.hidden = true; empty.hidden = false; loadMoreBtn.hidden = true; hasMore = false; loading = false; return;
+    }
+    renderItems(data.items);
+    offset = data.offset + data.count;
+    hasMore = data.hasMore;
+    loadMoreBtn.hidden = !hasMore;
+    loading = false;
+  }
+
+  async function loadMore() {
+    if (loading || !hasMore) return;
+    loading = true;
+    try {
+      const data = await fetchPage(offset);
+      renderItems(data.items);
+      offset += data.count;
+      hasMore = data.hasMore;
+      loadMoreBtn.hidden = !hasMore;
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      loading = false;
+    }
+  }
+
+  loadMoreBtn.addEventListener('click', loadMore);
+
+  // ---- 上传：选择/队列/上传进度 ----
+  let queue = [];
+
+  function addFiles(files) {
+    for (const f of files) {
+      const mimeOK = ACCEPT.includes(f.type) || ACCEPT.some(p => f.type.startsWith(p));
+      const sizeOK = f.size <= UPLOAD_MAX_MB * 1024 * 1024;
+      const item = {
+        file: f,
+        id: crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36)+Math.random().toString(36).slice(2,8)),
+        status: sizeOK && mimeOK ? 'ready' : 'rejected',
+        reason: !mimeOK ? '类型不支持' : (!sizeOK ? `超过上限 ${UPLOAD_MAX_MB}MB` : '')
+      };
+      queue.push(item);
+    }
+    renderQueue();
+  }
+
+  function renderQueue() {
+    queueEl.innerHTML = '';
+    for (const q of queue) {
+      const row = document.createElement('div'); row.className = 'row';
+      const left = document.createElement('div');
+      left.textContent = q.file.name + (q.reason ? ` (${q.reason})` : '');
+      const right = document.createElement('div');
+      if (q.status === 'rejected') {
+        const s = document.createElement('div'); s.className='err'; s.textContent='拒绝';
+        right.appendChild(s);
+      } else {
+        const bar = document.createElement('div'); bar.className = 'bar';
+        const fill = document.createElement('i'); fill.style.width = (q.progress||0)+'%';
+        bar.appendChild(fill);
+        right.appendChild(bar);
+        q._fill = fill;
+      }
+      row.appendChild(left); row.appendChild(right);
+      queueEl.appendChild(row);
+    }
+  }
+
+  // 拖拽
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drag'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault(); drop.classList.remove('drag');
+    if (e.dataTransfer.files && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+  });
+
+  picker.addEventListener('change', e => { if (e.target.files) addFiles(e.target.files); });
+
+  clearBtn.addEventListener('click', () => { queue = []; renderQueue(); });
+
+  startBtn.addEventListener('click', async () => {
+    // 顺序上传（简单稳定）；需要更快可以后续做并发控制
+    for (const q of queue) {
+      if (q.status !== 'ready') continue;
+      try {
+        await uploadOne(q);
+        q.status = 'done'; q.progress = 100; if (q._fill) q._fill.style.width='100%';
+      } catch (e) {
+        q.status = 'error'; q.reason = e.message || '上传失败';
+      }
+      renderQueue();
+    }
+    // 上传后刷新首屏（确保用到服务端生成的 URL 与元数据）
+    await loadFirstPage();
+  });
+
+  function uploadOne(q) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/upload');
+      const fd = new FormData();
+      // 后端字段名固定为 files
+      fd.append('files', q.file, q.file.name);
+
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable && q._fill) {
+          const pct = Math.floor(ev.loaded * 100 / ev.total);
+          q.progress = pct; q._fill.style.width = pct + '%';
+        }
+      };
+      xhr.onerror = () => reject(new Error('网络错误'));
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (!data || !data.saved) return reject(new Error('响应异常'));
+            resolve(data);
+          } catch { reject(new Error('解析失败')); }
+        } else {
+          try {
+            const err = JSON.parse(xhr.responseText);
+            reject(new Error(err && err.message ? err.message : ('HTTP '+xhr.status)));
+          } catch {
+            reject(new Error('HTTP '+xhr.status));
+          }
+        }
+      };
+      xhr.send(fd);
+    });
+  }
+
+  // 首屏
+  loadFirstPage().catch(err => { empty.textContent = '加载失败：' + err.message; empty.hidden = false; });
+
+})();
+</script>
+</body>
+</html>
+{{end}}

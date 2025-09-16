@@ -1,0 +1,199 @@
+{{define "slideshow"}}
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Slideshow · 播放</title>
+  <style>
+    :root{--bg:#000;--fg:#ddd;--muted:#aaa}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto}
+
+    /* 顶部工具栏 */
+    header{
+      display:flex;gap:10px;align-items:center;padding:10px;
+      border-bottom:1px solid #222;position:sticky;top:0;
+      background:#000c;backdrop-filter:blur(6px);
+      transition: transform .25s ease, opacity .25s ease;
+      z-index:2;
+    }
+    .btn{background:#151515;border:1px solid #2a2a2a;color:#ddd;padding:8px 12px;border-radius:8px;cursor:pointer}
+    .hint{color:var(--muted);font-size:12px}
+
+    /* 播放舞台 */
+    .stage{position:fixed;inset:52px 0 0 0;display:flex;align-items:center;justify-content:center;overflow:hidden;z-index:1}
+    .bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;filter:blur(40px) brightness(.4)}
+    .fg{position:relative;width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain}
+    .cap{position:absolute;left:0;right:0;bottom:18px;text-align:center;text-shadow:0 1px 2px #000}
+
+    .load{position:fixed;left:0;right:0;top:52px;text-align:center;color:var(--muted);z-index:3}
+
+    /* 工具栏显隐 */
+    body.toolbar-hidden header{ transform: translateY(-100%); opacity: 0; }
+    body.toolbar-hidden .stage{ inset:0; }
+    body.toolbar-hidden{ cursor: none; }
+  </style>
+</head>
+<body>
+<header>
+  <a class="btn" href="/">← 返回</a>
+  <button id="prev" class="btn">← 上一张</button>
+  <button id="next" class="btn">下一张 →</button>
+  <button id="pause" class="btn">暂停/继续 (Space)</button>
+  <label class="hint">间隔 <input id="interval" type="number" min="1" max="60" value="{{.IntervalSec}}" style="width:56px"> s</label>
+  <label class="hint"><input id="shuffle" type="checkbox" checked> 随机</label>
+  <button id="full" class="btn">全屏 (F)</button>
+  <button id="toggleBar" class="btn">隐藏工具栏 (H)</button>
+  <span id="count" class="hint"></span>
+</header>
+
+<div class="load" id="loadinfo">正在加载列表…</div>
+
+<div class="stage">
+  <img id="bg"  class="bg" alt="">
+  <img id="img" class="fg" alt="">
+  <div id="cap" class="cap"></div>
+</div>
+
+<script>
+(() => {
+  const PAGE = {{.PageSize}};
+  const initInterval = parseInt("{{.IntervalSec}}", 10) || 3;
+  const qs = new URLSearchParams(location.search);
+
+  // DOM
+  const el = {
+    img: document.getElementById('img'),
+    bg:  document.getElementById('bg'),
+    cap: document.getElementById('cap'),
+    interval: document.getElementById('interval'),
+    shuffle: document.getElementById('shuffle'),
+    prev: document.getElementById('prev'),
+    next: document.getElementById('next'),
+    pause: document.getElementById('pause'),
+    full: document.getElementById('full'),
+    toggleBar: document.getElementById('toggleBar'),
+    count: document.getElementById('count'),
+    loadinfo: document.getElementById('loadinfo'),
+  };
+
+  // 状态
+  let list = [];
+  let idx = 0;
+  let timer = null;
+  let sec = initInterval;
+  let paused = false;
+
+  // 分页抓全量
+  async function fetchAll() {
+    let off = 0, all = [];
+    for (;;) {
+      el.loadinfo.textContent = `正在加载… offset=${off}`;
+      const res = await fetch(`/api/photos?limit=${PAGE}&offset=${off}`, {headers:{'Accept':'application/json'}});
+      if (!res.ok) throw new Error('加载失败: ' + res.status);
+      const data = await res.json();
+      if (!data.items || data.items.length === 0) break;
+      all = all.concat(data.items);
+      off += data.count;
+      if (!data.hasMore) break;
+    }
+    el.loadinfo.textContent = '';
+    return all;
+  }
+
+  // 洗牌
+  function shuffleInplace(arr){
+    for (let i=arr.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+  }
+
+  // 预加载后切换，避免白屏
+  function preloadAndShow(i){
+    if (!list.length) return;
+    idx = (i + list.length) % list.length;
+    const it = list[idx];
+    const pre = new Image();
+    pre.onload = () => {
+      el.img.src = it.pathOriginal;
+      el.bg.src  = it.pathOriginal;
+      el.cap.textContent = it.fileName || '';
+      el.count.textContent = `${idx+1}/${list.length}`;
+    };
+    pre.src = it.pathOriginal;
+  }
+
+  function schedule(){
+    clearInterval(timer);
+    timer = setInterval(() => { if (!paused) preloadAndShow(idx+1); }, sec*1000);
+  }
+
+  // 工具栏显隐
+  function setToolbarHidden(hidden){
+    document.body.classList.toggle('toolbar-hidden', hidden);
+    if (el.toggleBar) el.toggleBar.textContent = hidden ? '显示工具栏 (H)' : '隐藏工具栏 (H)';
+  }
+
+  // 绑定事件
+  el.prev.onclick  = () => { preloadAndShow(idx-1); schedule(); };
+  el.next.onclick  = () => { preloadAndShow(idx+1); schedule(); };
+  el.pause.onclick = () => { paused = !paused; if (!paused) schedule(); };
+  el.interval.onchange = () => {
+    const v = parseInt(el.interval.value, 10);
+    if (v>=1 && v<=60) { sec = v; schedule(); }
+  };
+  el.full.onclick = () => {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+    else document.exitFullscreen?.();
+  };
+  el.toggleBar.onclick = () => {
+    setToolbarHidden(!document.body.classList.contains('toolbar-hidden'));
+  };
+
+  // 键盘快捷键
+  window.addEventListener('keydown', (e) => {
+    if (e.key==='Escape') history.back();
+    else if (e.key==='ArrowLeft')  { e.preventDefault(); el.prev.click(); }
+    else if (e.key==='ArrowRight') { e.preventDefault(); el.next.click(); }
+    else if (e.key===' ')          { e.preventDefault(); el.pause.click(); }
+    else if (e.key==='f' || e.key==='F') { e.preventDefault(); el.full.click(); }
+    else if (e.key===',' )         { e.preventDefault(); sec=Math.max(1,sec-1); el.interval.value=sec; schedule(); }
+    else if (e.key==='.' )         { e.preventDefault(); sec=Math.min(60,sec+1); el.interval.value=sec; schedule(); }
+    else if (e.key==='h' || e.key==='H') {
+      e.preventDefault();
+      setToolbarHidden(!document.body.classList.contains('toolbar-hidden'));
+    }
+  });
+
+  // 启动：抓全量 →（默认）随机 → 播放
+  (async function start(){
+    try{
+      list = await fetchAll();
+      if (!list.length) {
+        el.loadinfo.textContent = '没有照片可播放';
+        return;
+      }
+      // 随机：checkbox 默认勾选；URL ?shuffle=0 可关闭
+      const qsShuffle = qs.get('shuffle');
+      el.shuffle.checked = qsShuffle === null ? true : (qsShuffle !== '0');
+      if (el.shuffle.checked) shuffleInplace(list);
+
+      // URL 可带 interval= 秒
+      const qsInterval = parseInt(qs.get('interval') || '', 10);
+      if (qsInterval && qsInterval>=1 && qsInterval<=60) { sec = qsInterval; el.interval.value = sec; }
+
+      paused = false;
+      preloadAndShow(0);
+      schedule();
+    }catch(err){
+      el.loadinfo.textContent = '加载失败：' + (err && err.message ? err.message : err);
+      console.error(err);
+    }
+  })();
+})();
+</script>
+</body>
+</html>
+{{end}}

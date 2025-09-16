@@ -1,116 +1,90 @@
 package main
 
 import (
-	"context"
 	"database/sql"
-	"log/slog"
+	"html/template"
+	"log"
 	"net/http"
-	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
-	"time"
-
-	_ "github.com/go-sql-driver/mysql"
+	"runtime"
 
 	"github.com/RENCHILIU/gallerio/internal/config"
+	"github.com/RENCHILIU/gallerio/internal/httpx/handlers"
 	"github.com/RENCHILIU/gallerio/internal/httpx/middleware"
+	"github.com/RENCHILIU/gallerio/internal/store"
+	_ "github.com/go-sql-driver/mysql"
 )
 
-func init() {
-	// 把 slog 设置为 Debug handler，输出更多字段
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}))
-	slog.SetDefault(logger)
-}
-
 func main() {
+	// 1) 读取 .env（开发环境用；线上容器里可不需要）
+	config.LoadDotEnv(".env.local")
 	config.LoadDotEnv(".env")
+
+	// 2) 装载配置（从环境变量读取，带默认值）
 	cfg := config.Load()
-	slog.Info("starting gallerio", "addr", cfg.AppAddr, "dataDir", cfg.DataDir)
 
-	// 确保数据目录存在
-	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "photos", "original"), 0o755); err != nil {
-		slog.Error("mkdir data", "err", err)
-		os.Exit(1)
-	}
-
-	// 连接 MySQL
+	// 3) 初始化数据库（确保 DSN 带 parseTime=true）
 	db, err := sql.Open("mysql", cfg.MysqlDSN)
 	if err != nil {
-		slog.Error("sql.Open", "err", err)
-		os.Exit(1)
+		log.Fatalf("open db: %v", err)
 	}
-	db.SetMaxOpenConns(20)
-	db.SetMaxIdleConns(20)
-	db.SetConnMaxLifetime(time.Hour)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		slog.Error("db ping failed", "err", err)
-		os.Exit(1)
+	if err := db.Ping(); err != nil {
+		log.Fatalf("ping db: %v", err)
 	}
-	slog.Info("db connected")
+	defer db.Close()
 
-	// 路由
+	// 4) 依赖注入：store & handlers
+	st := store.New(db)
+
+	const maxPageSize = 500
+	photos := handlers.NewPhotosHandler(st, cfg.PageSize, maxPageSize)
+	upload := handlers.NewUploadHandler(st, cfg.DataDir, cfg.UploadMaxMB)
+
+	// 5) 解析模板（与启动目录无关）
+	tpl := mustLoadTemplates()
+	web := handlers.NewWebHandler(tpl, cfg.PageSize, cfg.UploadMaxMB)
+
+	// 6) 路由
 	mux := http.NewServeMux()
-
-	// 首页
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "web/templates/index.html")
-	})
-
-	// Swagger 文档
-	mux.Handle("/docs/", http.StripPrefix("/docs/", http.FileServer(http.Dir("web/docs"))))
-
-	// 静态资源（如果你放 JS/CSS）
-	mux.Handle("/web/", http.StripPrefix("/web/", http.FileServer(http.Dir("web/static"))))
-
-	// 原图（禁止目录列出）
-	mux.Handle("/media/original/",
-		http.StripPrefix("/media/original/",
-			middleware.NoDirFileServer(filepath.Join(cfg.DataDir, "photos", "original")),
-		),
-	)
 
 	// 健康检查
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
-		defer cancel()
-		if err := db.PingContext(ctx); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"ok":false}`))
-			return
-		}
-		w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte("ok"))
 	})
 
-	// 包裹中间件
-	handler := middleware.Recover(middleware.Logging(mux))
+	// API
+	mux.HandleFunc("/api/photos", photos.List)
+	mux.HandleFunc("/api/upload", upload.Upload)
 
-	srv := &http.Server{
-		Addr:              cfg.AppAddr,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	// 页面
+	mux.HandleFunc("/", web.Index)
+	mux.HandleFunc("/slideshow", web.Slideshow)
 
-	// 优雅关闭
-	go func() {
-		slog.Info("http listening", "addr", cfg.AppAddr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("ListenAndServe", "err", err)
-		}
-	}()
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	slog.Info("shutting down...")
-	shutCtx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel2()
-	_ = srv.Shutdown(shutCtx)
-	_ = db.Close()
-	slog.Info("bye")
+	// 静态：/media -> DATA_DIR（例如 ./data）
+	fs := http.FileServer(http.Dir(cfg.DataDir))
+	mux.Handle("/media/", http.StripPrefix("/media/", fs))
+
+	// 7) 中间件：RequestID -> 访问日志
+	var handler http.Handler = mux
+	handler = middleware.RequestID(handler)
+	handler = middleware.AccessLog(handler)
+
+	log.Printf("listening on %s | DATA_DIR=%s", cfg.AppAddr, cfg.DataDir)
+	log.Fatal(http.ListenAndServe(cfg.AppAddr, handler))
+}
+
+// mustLoadTemplates 通过当前源文件路径反推项目根，解析模板文件。
+// 无论你从仓库根还是 cmd/server 目录启动，都能找到模板。
+func mustLoadTemplates() *template.Template {
+	// file 是当前 main.go 的绝对路径：.../cmd/server/main.go
+	_, file, _, _ := runtime.Caller(0)
+	// 项目根：从 cmd/server 回退两级到仓库根
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	tplDir := filepath.Join(repoRoot, "web", "templates")
+
+	// 解析 index.tmpl + slideshow.tmpl
+	return template.Must(template.ParseFiles(
+		filepath.Join(tplDir, "index.tmpl"),
+		filepath.Join(tplDir, "slideshow.tmpl"),
+	))
 }
