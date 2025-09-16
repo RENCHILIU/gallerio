@@ -1,5 +1,5 @@
 # ---------- builder ----------
-FROM golang:1.22-alpine AS build
+FROM golang:1.24.6-alpine AS build
 WORKDIR /app
 # 依赖
 RUN apk add --no-cache git
